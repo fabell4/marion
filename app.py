@@ -1,4 +1,3 @@
-# app.py
 import os, time, ipaddress
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, HTTPException
@@ -20,7 +19,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
     allow_credentials=False,
-    allow_methods=["POST", "OPTIONS"],
+    allow_methods=["POST", "OPTIONS", "GET"],
     allow_headers=["content-type"],
 )
 
@@ -93,7 +92,11 @@ async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> s
         return ""
 
 async def handle_chat(req: Request):
-    body = await req.json()
+    try:
+        body = await req.json()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+    
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         raise HTTPException(status_code=400, detail="messages[] is required")
@@ -112,6 +115,7 @@ async def handle_chat(req: Request):
         {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
     )
 
+# Multiple route patterns to handle different URL formats
 @app.post("/api/chat")
 async def chat(req: Request):
     return await handle_chat(req)
@@ -119,6 +123,14 @@ async def chat(req: Request):
 @app.post("/api/chat/")
 async def chat_slash(req: Request):
     return await handle_chat(req)
+
+# Add a catch-all route for debugging
+@app.api_route("/api/chat/{path:path}", methods=["POST", "GET"])
+async def chat_catchall(req: Request, path: str):
+    if req.method == "POST":
+        return await handle_chat(req)
+    else:
+        return {"message": f"POST to /api/chat, received GET to /api/chat/{path}"}
 
 @app.get("/api/ping")
 def ping():
@@ -128,3 +140,20 @@ def ping():
 async def echo(req: Request):
     body = await req.json()
     return {"you_sent": body}
+
+# Add a debug route to see all available routes
+@app.get("/debug/routes")
+def list_routes():
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'methods') and hasattr(route, 'path'):
+            routes.append({
+                "path": route.path,
+                "methods": list(route.methods) if route.methods else []
+            })
+    return {"routes": routes}
+
+# Health check endpoint
+@app.get("/health")
+def health():
+    return {"status": "healthy", "model": HF_MODEL, "token_configured": bool(HF_API_TOKEN)}
