@@ -65,11 +65,19 @@ def root():
     return PlainTextResponse(f"AI Assistant Proxy up. Mode: {mode}. POST /api/chat")
 
 async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> str:
+    print(f"=== HF_GENERATE START ===")
+    print(f"HF_API_TOKEN configured: {bool(HF_API_TOKEN)}")
+    print(f"HF_MODEL: {HF_MODEL}")
+    
     if not HF_API_TOKEN:
+        print("ERROR: HF_API_TOKEN missing")
         raise HTTPException(status_code=500, detail="Server misconfigured: missing HF_API_TOKEN")
+    
     url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+    print(f"URL: {url}")
+    
     headers = {
-        "Authorization": f"Bearer {HF_API_TOKEN}",
+        "Authorization": f"Bearer {HF_API_TOKEN[:10]}...",  # Only log first 10 chars
         "Content-Type": "application/json",
     }
     payload = {
@@ -80,16 +88,51 @@ async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> s
             "return_full_text": False,
         },
     }
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(url, json=payload, headers=headers)
-        if r.status_code >= 400:
-            raise HTTPException(status_code=r.status_code, detail=r.text)
-        data = r.json()
-        if isinstance(data, list) and data and "generated_text" in data[0]:
-            return data[0]["generated_text"]
-        if isinstance(data, dict) and "generated_text" in data:
-            return data["generated_text"]
-        return ""
+    print(f"Payload: {payload}")
+    
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            print("Making HTTP request to HF...")
+            r = await client.post(url, json=payload, headers=headers)
+            print(f"HTTP Status: {r.status_code}")
+            print(f"Response headers: {dict(r.headers)}")
+            
+            if r.status_code >= 400:
+                print(f"ERROR: HTTP {r.status_code}")
+                print(f"Error response: {r.text}")
+                raise HTTPException(status_code=r.status_code, detail=r.text)
+            
+            try:
+                data = r.json()
+                print(f"Response data type: {type(data)}")
+                print(f"Response data: {data}")
+            except Exception as json_err:
+                print(f"JSON parsing error: {json_err}")
+                print(f"Raw response: {r.text}")
+                raise HTTPException(status_code=500, detail=f"Invalid JSON response: {json_err}")
+            
+            if isinstance(data, list) and data and "generated_text" in data[0]:
+                result = data[0]["generated_text"]
+                print(f"Success: returning generated text of length {len(result)}")
+                return result
+            if isinstance(data, dict) and "generated_text" in data:
+                result = data["generated_text"]
+                print(f"Success: returning generated text of length {len(result)}")
+                return result
+            
+            print(f"Unexpected response format: {data}")
+            return ""
+    except httpx.RequestError as req_err:
+        print(f"Request error: {req_err}")
+        raise HTTPException(status_code=500, detail=f"Request failed: {str(req_err)}")
+    except HTTPException:
+        print("HTTPException re-raised from hf_generate")
+        raise
+    except Exception as e:
+        print(f"Unexpected error in hf_generate: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"HF API error: {str(e)}")
 
 async def handle_chat(req: Request):
     try:
