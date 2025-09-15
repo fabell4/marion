@@ -115,16 +115,24 @@ async def handle_chat(req: Request):
         {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
     )
 
-# Multiple route patterns to handle different URL formats
-@app.post("/api/chat")
-async def chat(req: Request):
+# Multiple route patterns to handle different URL formats - simplified
+@app.api_route("/api/chat", methods=["POST"], response_class=JSONResponse)
+async def chat_main(req: Request):
+    print(f"=== CHAT ENDPOINT HIT ===")
+    print(f"Method: {req.method}")
+    print(f"Content-Type: {req.headers.get('content-type')}")
     return await handle_chat(req)
 
-@app.post("/api/chat/")
+@app.api_route("/api/chat/", methods=["POST"], response_class=JSONResponse) 
 async def chat_slash(req: Request):
+    print(f"=== CHAT SLASH ENDPOINT HIT ===")
     return await handle_chat(req)
 
-# Add a catch-all route for debugging
+# Test with a different endpoint name to rule out caching
+@app.api_route("/api/chat-test", methods=["POST"], response_class=JSONResponse)
+async def chat_test(req: Request):
+    print(f"=== CHAT TEST ENDPOINT HIT ===")
+    return await handle_chat(req)
 @app.api_route("/api/chat/{path:path}", methods=["POST", "GET"])
 async def chat_catchall(req: Request, path: str):
     if req.method == "POST":
