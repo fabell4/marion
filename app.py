@@ -132,6 +132,24 @@ async def chat_catchall(req: Request, path: str):
     else:
         return {"message": f"POST to /api/chat, received GET to /api/chat/{path}"}
 
+# Add logging middleware to debug requests
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"=== REQUEST DEBUG ===")
+    print(f"Method: {request.method}")
+    print(f"URL: {request.url}")
+    print(f"Path: {request.url.path}")
+    print(f"Headers: {dict(request.headers)}")
+    print(f"==================")
+    
+    response = await call_next(request)
+    
+    print(f"=== RESPONSE DEBUG ===")
+    print(f"Status: {response.status_code}")
+    print(f"==================")
+    
+    return response
+
 @app.get("/api/ping")
 def ping():
     return {"ok": True}
