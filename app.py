@@ -112,13 +112,24 @@ async def handle_chat(req: Request):
         {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
     )
 
+#@app.post("/api/chat")
+#async def chat(req: Request):  # no trailing slash
+#    return await handle_chat(req)
+
+#@app.post("/api/chat/")
+#async def chat_slash(req: Request):  # trailing slash variant
+#    return await handle_chat(req)
+
 @app.post("/api/chat")
-async def chat(req: Request):  # no trailing slash
-    return await handle_chat(req)
+async def chat(req: Request):
+    body = await req.json()
+    # Return a static response to prove the POST route is matched
+    return {"reply": "Hi! (static test)", "provider": "test", "echo": body}
 
 @app.post("/api/chat/")
-async def chat_slash(req: Request):  # trailing slash variant
-    return await handle_chat(req)
+async def chat_slash(req: Request):
+    body = await req.json()
+    return {"reply": "Hi! (static test with slash)", "provider": "test", "echo": body}
 
 @app.get("/api/ping")
 def ping():
