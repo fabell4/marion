@@ -119,3 +119,12 @@ async def chat(req: Request):  # no trailing slash
 @app.post("/api/chat/")
 async def chat_slash(req: Request):  # trailing slash variant
     return await handle_chat(req)
+
+@app.get("/api/ping")
+def ping():
+    return {"ok": True}
+
+@app.post("/api/echo")
+async def echo(req: Request):
+    body = await req.json()
+    return {"you_sent": body}
