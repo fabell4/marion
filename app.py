@@ -93,27 +93,56 @@ async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> s
 
 async def handle_chat(req: Request):
     try:
-        body = await req.json()
+        print(f"=== HANDLE_CHAT START ===")
+        
+        try:
+            body = await req.json()
+            print(f"Body parsed: {body}")
+        except Exception as e:
+            print(f"JSON parsing error: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
+        
+        messages = body.get("messages")
+        print(f"Messages: {messages}")
+        if not isinstance(messages, list) or not messages:
+            print("Messages validation failed")
+            raise HTTPException(status_code=400, detail="messages[] is required")
+
+        ip = client_ip(req)
+        print(f"Client IP: {ip}")
+        
+        if hit(rate_min, f"min:{ip}", PER_MINUTE, 60):
+            print("Rate limit hit - per minute")
+            raise HTTPException(status_code=429, detail="Per-minute limit hit.")
+        if hit(rate_day, f"day:{ip}", DAILY_CAP, 24 * 60 * 60):
+            print("Rate limit hit - daily")
+            raise HTTPException(status_code=429, detail="Daily cap reached.")
+
+        prompt = to_instruct_prompt(messages)
+        print(f"Prompt created: {prompt[:100]}...")
+        
+        temperature = float(body.get("temperature", 0.7))
+        max_tokens = int(body.get("max_tokens", 256))
+        print(f"Temperature: {temperature}, Max tokens: {max_tokens}")
+        
+        print("Calling HF generate...")
+        text = await hf_generate(prompt, temperature, max_tokens)
+        print(f"HF response: {text[:100] if text else 'empty'}...")
+        
+        response = JSONResponse(
+            {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
+        )
+        print("Response created successfully")
+        return response
+        
+    except HTTPException:
+        print("HTTPException re-raised")
+        raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-    
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise HTTPException(status_code=400, detail="messages[] is required")
-
-    ip = client_ip(req)
-    if hit(rate_min, f"min:{ip}", PER_MINUTE, 60):
-        raise HTTPException(status_code=429, detail="Per-minute limit hit.")
-    if hit(rate_day, f"day:{ip}", DAILY_CAP, 24 * 60 * 60):
-        raise HTTPException(status_code=429, detail="Daily cap reached.")
-
-    prompt = to_instruct_prompt(messages)
-    temperature = float(body.get("temperature", 0.7))
-    max_tokens = int(body.get("max_tokens", 256))
-    text = await hf_generate(prompt, temperature, max_tokens)
-    return JSONResponse(
-        {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
-    )
+        print(f"Unexpected error in handle_chat: {e}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 # Multiple route patterns to handle different URL formats - simplified
 @app.api_route("/api/chat", methods=["POST"], response_class=JSONResponse)
@@ -133,6 +162,16 @@ async def chat_slash(req: Request):
 async def chat_test(req: Request):
     print(f"=== CHAT TEST ENDPOINT HIT ===")
     return await handle_chat(req)
+
+# Simple test endpoint that doesn't call handle_chat
+@app.api_route("/api/simple-test", methods=["POST"], response_class=JSONResponse)
+async def simple_test(req: Request):
+    print(f"=== SIMPLE TEST ENDPOINT HIT ===")
+    try:
+        body = await req.json()
+        return JSONResponse({"status": "success", "received": body})
+    except Exception as e:
+        return JSONResponse({"status": "error", "error": str(e)})
 @app.api_route("/api/chat/{path:path}", methods=["POST", "GET"])
 async def chat_catchall(req: Request, path: str):
     if req.method == "POST":
