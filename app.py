@@ -1,3 +1,4 @@
+# app.py
 import os, time, ipaddress
 from typing import Dict, Any, List
 from fastapi import FastAPI, Request, HTTPException
@@ -21,6 +22,7 @@ app.add_middleware(
     allow_headers=["content-type"],
 )
 
+# ---- simple in-memory rate limits ----
 rate_window_minute: Dict[str, Dict[str, Any]] = {}
 rate_window_day: Dict[str, Dict[str, Any]] = {}
 
@@ -72,7 +74,11 @@ async def chat(req: Request):
 
     payload = {
         "inputs": to_instruct_prompt(messages),
-        "parameters": {"max_new_tokens": int(body.get("max_tokens", 256)), "temperature": float(body.get("temperature", 0.7)), "return_full_text": False}
+        "parameters": {
+            "max_new_tokens": int(body.get("max_tokens", 256)),
+            "temperature": float(body.get("temperature", 0.7)),
+            "return_full_text": False
+        }
     }
     url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}", "Content-Type": "application/json"}
