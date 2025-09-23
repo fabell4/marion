@@ -13,7 +13,7 @@ Env variables to set in the Space (Settings → Variables & secrets):
     GROQ_API_KEY          (required for Groq)
     HF_API_TOKEN          (optional; enables HF fallback)
   Variables:
-    GROQ_MODEL            default: llama-3.1-8b-instruct
+    GROQ_MODEL            default: llama-3.1-8b-instant
     HF_MODEL              default: mistralai/Mistral-7B-Instruct
     ALLOWED_ORIGINS       e.g. "http://localhost:8080,https://your-domain,https://yourname.github.io"
     PER_MINUTE            default: 6
@@ -32,7 +32,7 @@ import httpx
 
 # === Config ===
 GROQ_API_KEY = (os.environ.get("GROQ_API_KEY") or "").strip()
-GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instruct")
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 
 HF_API_TOKEN = (os.environ.get("HF_API_TOKEN") or "").strip()
 HF_MODEL     = os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct")
