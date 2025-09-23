@@ -1,20 +1,49 @@
-import os, time, ipaddress
+# app.py
+"""
+AI Assistant Proxy (FastAPI)
+- Primary provider: Groq (free tier), OpenAI-compatible Chat Completions API
+- Optional fallback: Hugging Face Inference API (serverless) if configured
+- Safe for static front-ends: keys stay server-side
+- Endpoints:
+    GET  /                -> basic status
+    GET  /api/ping        -> health check
+    POST /api/chat        -> chat endpoint (also /api/chat/)
+Env variables to set in the Space (Settings → Variables & secrets):
+  Secrets:
+    GROQ_API_KEY          (required for Groq)
+    HF_API_TOKEN          (optional; enables HF fallback)
+  Variables:
+    GROQ_MODEL            default: llama-3.1-8b-instruct
+    HF_MODEL              default: mistralai/Mistral-7B-Instruct
+    ALLOWED_ORIGINS       e.g. "http://localhost:8080,https://your-domain,https://yourname.github.io"
+    PER_MINUTE            default: 6
+    DAILY_CAP             default: 50
+"""
+
+import os
+import time
+import ipaddress
 from typing import Dict, Any, List
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-# --- config from environment ---
+# === Config ===
+GROQ_API_KEY = (os.environ.get("GROQ_API_KEY") or "").strip()
+GROQ_MODEL   = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instruct")
+
 HF_API_TOKEN = (os.environ.get("HF_API_TOKEN") or "").strip()
-HF_MODEL = os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct")
-ALLOWED_ORIGINS = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+HF_MODEL     = os.environ.get("HF_MODEL", "mistralai/Mistral-7B-Instruct")
+
+ALLOWED_ORIGINS = [o.strip() for o in (os.environ.get("ALLOWED_ORIGINS") or "*").split(",") if o.strip()]
 PER_MINUTE = int(os.environ.get("PER_MINUTE", "6"))
-DAILY_CAP = int(os.environ.get("DAILY_CAP", "50"))
+DAILY_CAP  = int(os.environ.get("DAILY_CAP", "50"))
 
 app = FastAPI()
 
-# CORS
+# CORS (allow your local dev and public domains via ALLOWED_ORIGINS)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS if ALLOWED_ORIGINS != ["*"] else ["*"],
@@ -23,7 +52,7 @@ app.add_middleware(
     allow_headers=["content-type"],
 )
 
-# --- simple in-memory rate limits (per IP) ---
+# === Simple in-memory rate limiting (per IP) ===
 rate_min: Dict[str, Dict[str, Any]] = {}
 rate_day: Dict[str, Dict[str, Any]] = {}
 
@@ -45,6 +74,7 @@ def hit(bucket: Dict[str, Dict[str, Any]], key: str, limit: int, ttl: int) -> bo
     entry["count"] += 1
     return entry["count"] > limit
 
+# === Utility: convert chat messages -> simple instruct prompt (for HF fallback) ===
 def to_instruct_prompt(messages: List[Dict[str, str]]) -> str:
     parts: List[str] = []
     for m in messages:
@@ -61,25 +91,43 @@ def to_instruct_prompt(messages: List[Dict[str, str]]) -> str:
 
 @app.get("/")
 def root():
-    mode = "huggingface" if HF_API_TOKEN else "unconfigured"
+    mode = "groq" if GROQ_API_KEY else ("huggingface" if HF_API_TOKEN else "unconfigured")
     return PlainTextResponse(f"AI Assistant Proxy up. Mode: {mode}. POST /api/chat")
 
-async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> str:
-    print(f"=== HF_GENERATE START ===")
-    print(f"HF_API_TOKEN configured: {bool(HF_API_TOKEN)}")
-    print(f"HF_MODEL: {HF_MODEL}")
-    
-    if not HF_API_TOKEN:
-        print("ERROR: HF_API_TOKEN missing")
-        raise HTTPException(status_code=500, detail="Server misconfigured: missing HF_API_TOKEN")
-    
-    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
-    print(f"URL: {url}")
-    
-    headers = {
-        "Authorization": f"Bearer {HF_API_TOKEN[:10]}...",  # Only log first 10 chars
-        "Content-Type": "application/json",
+# === Providers ===
+async def groq_generate_chat(messages: List[Dict[str, str]], temperature: float, max_tokens: int) -> str:
+    """Call Groq's OpenAI-compatible Chat Completions API."""
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=500, detail="Server misconfigured: missing GROQ_API_KEY")
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": messages,          # expects [{"role": "...", "content": "..."}]
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
     }
+
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        if r.status_code >= 400:
+            # Surface Groq errors clearly to logs/client
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+        data = r.json()
+        try:
+            return data["choices"][0]["message"]["content"]
+        except Exception:
+            raise HTTPException(status_code=500, detail="Unexpected Groq response shape")
+
+async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> str:
+    """Call Hugging Face Serverless Inference (text-generation pipeline)."""
+    if not HF_API_TOKEN:
+        raise HTTPException(status_code=500, detail="Server misconfigured: missing HF_API_TOKEN")
+
+    url = f"https://api-inference.huggingface.co/models/{HF_MODEL}"
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}", "Content-Type": "application/json"}
     payload = {
         "inputs": prompt,
         "parameters": {
@@ -88,180 +136,82 @@ async def hf_generate(prompt: str, temperature: float, max_new_tokens: int) -> s
             "return_full_text": False,
         },
     }
-    print(f"Payload: {payload}")
-    
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            print("Making HTTP request to HF...")
-            r = await client.post(url, json=payload, headers=headers)
-            print(f"HTTP Status: {r.status_code}")
-            print(f"Response headers: {dict(r.headers)}")
-            
-            if r.status_code >= 400:
-                print(f"ERROR: HTTP {r.status_code}")
-                print(f"Error response: {r.text}")
-                raise HTTPException(status_code=r.status_code, detail=r.text)
-            
-            try:
-                data = r.json()
-                print(f"Response data type: {type(data)}")
-                print(f"Response data: {data}")
-            except Exception as json_err:
-                print(f"JSON parsing error: {json_err}")
-                print(f"Raw response: {r.text}")
-                raise HTTPException(status_code=500, detail=f"Invalid JSON response: {json_err}")
-            
-            if isinstance(data, list) and data and "generated_text" in data[0]:
-                result = data[0]["generated_text"]
-                print(f"Success: returning generated text of length {len(result)}")
-                return result
-            if isinstance(data, dict) and "generated_text" in data:
-                result = data["generated_text"]
-                print(f"Success: returning generated text of length {len(result)}")
-                return result
-            
-            print(f"Unexpected response format: {data}")
-            return ""
-    except httpx.RequestError as req_err:
-        print(f"Request error: {req_err}")
-        raise HTTPException(status_code=500, detail=f"Request failed: {str(req_err)}")
-    except HTTPException:
-        print("HTTPException re-raised from hf_generate")
-        raise
-    except Exception as e:
-        print(f"Unexpected error in hf_generate: {e}")
-        import traceback
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"HF API error: {str(e)}")
 
+    async with httpx.AsyncClient(timeout=120) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        if r.status_code >= 400:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+        data = r.json()
+        # HF can return a list or a dict depending on backend
+        if isinstance(data, list) and data and isinstance(data[0], dict) and "generated_text" in data[0]:
+            return data[0]["generated_text"]
+        if isinstance(data, dict) and "generated_text" in data:
+            return data["generated_text"]
+        # If the structure is different (e.g., model loading), surface it
+        return ""
+
+# === Main handler ===
 async def handle_chat(req: Request):
-    try:
-        print(f"=== HANDLE_CHAT START ===")
-        
-        try:
-            body = await req.json()
-            print(f"Body parsed: {body}")
-        except Exception as e:
-            print(f"JSON parsing error: {e}")
-            raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(e)}")
-        
-        messages = body.get("messages")
-        print(f"Messages: {messages}")
-        if not isinstance(messages, list) or not messages:
-            print("Messages validation failed")
-            raise HTTPException(status_code=400, detail="messages[] is required")
-
-        ip = client_ip(req)
-        print(f"Client IP: {ip}")
-        
-        if hit(rate_min, f"min:{ip}", PER_MINUTE, 60):
-            print("Rate limit hit - per minute")
-            raise HTTPException(status_code=429, detail="Per-minute limit hit.")
-        if hit(rate_day, f"day:{ip}", DAILY_CAP, 24 * 60 * 60):
-            print("Rate limit hit - daily")
-            raise HTTPException(status_code=429, detail="Daily cap reached.")
-
-        prompt = to_instruct_prompt(messages)
-        print(f"Prompt created: {prompt[:100]}...")
-        
-        temperature = float(body.get("temperature", 0.7))
-        max_tokens = int(body.get("max_tokens", 256))
-        print(f"Temperature: {temperature}, Max tokens: {max_tokens}")
-        
-        print("Calling HF generate...")
-        text = await hf_generate(prompt, temperature, max_tokens)
-        print(f"HF response: {text[:100] if text else 'empty'}...")
-        
-        response = JSONResponse(
-            {"reply": text, "usage": {}, "model": HF_MODEL, "provider": "huggingface"}
-        )
-        print("Response created successfully")
-        return response
-        
-    except HTTPException:
-        print("HTTPException re-raised")
-        raise
-    except Exception as e:
-        print(f"Unexpected error in handle_chat: {e}")
-        import traceback
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-
-# Multiple route patterns to handle different URL formats - simplified
-@app.api_route("/api/chat", methods=["POST"], response_class=JSONResponse)
-async def chat_main(req: Request):
-    print(f"=== CHAT ENDPOINT HIT ===")
-    print(f"Method: {req.method}")
-    print(f"Content-Type: {req.headers.get('content-type')}")
-    return await handle_chat(req)
-
-@app.api_route("/api/chat/", methods=["POST"], response_class=JSONResponse) 
-async def chat_slash(req: Request):
-    print(f"=== CHAT SLASH ENDPOINT HIT ===")
-    return await handle_chat(req)
-
-# Test with a different endpoint name to rule out caching
-@app.api_route("/api/chat-test", methods=["POST"], response_class=JSONResponse)
-async def chat_test(req: Request):
-    print(f"=== CHAT TEST ENDPOINT HIT ===")
-    return await handle_chat(req)
-
-# Simple test endpoint that doesn't call handle_chat
-@app.api_route("/api/simple-test", methods=["POST"], response_class=JSONResponse)
-async def simple_test(req: Request):
-    print(f"=== SIMPLE TEST ENDPOINT HIT ===")
+    # Parse & validate
     try:
         body = await req.json()
-        return JSONResponse({"status": "success", "received": body})
     except Exception as e:
-        return JSONResponse({"status": "error", "error": str(e)})
-@app.api_route("/api/chat/{path:path}", methods=["POST", "GET"])
-async def chat_catchall(req: Request, path: str):
-    if req.method == "POST":
-        return await handle_chat(req)
-    else:
-        return {"message": f"POST to /api/chat, received GET to /api/chat/{path}"}
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}")
 
-# Add logging middleware to debug requests
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    print(f"=== REQUEST DEBUG ===")
-    print(f"Method: {request.method}")
-    print(f"URL: {request.url}")
-    print(f"Path: {request.url.path}")
-    print(f"Headers: {dict(request.headers)}")
-    print(f"==================")
-    
-    response = await call_next(request)
-    
-    print(f"=== RESPONSE DEBUG ===")
-    print(f"Status: {response.status_code}")
-    print(f"==================")
-    
-    return response
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise HTTPException(status_code=400, detail="messages[] is required")
+
+    # Rate limits
+    ip = client_ip(req)
+    if hit(rate_min, f"min:{ip}", PER_MINUTE, 60):
+        raise HTTPException(status_code=429, detail="Per-minute limit hit.")
+    if hit(rate_day, f"day:{ip}", DAILY_CAP, 24 * 60 * 60):
+        raise HTTPException(status_code=429, detail="Daily cap reached.")
+
+    # Params
+    temperature = float(body.get("temperature", 0.7))
+    max_tokens  = int(body.get("max_tokens", 256))
+
+    # Provider order: Groq → HF fallback
+    # If Groq call fails with HTTP errors and HF is configured, we try HF.
+    provider = None
+    model = None
+    text = None
+
+    # Try Groq first if key present
+    if GROQ_API_KEY:
+        try:
+            text = await groq_generate_chat(messages, temperature, max_tokens)
+            provider = "groq"; model = GROQ_MODEL
+        except HTTPException as e:
+            # Only fall back if HF is configured; otherwise propagate error
+            if HF_API_TOKEN:
+                # Build instruct-style prompt for HF
+                prompt = to_instruct_prompt(messages)
+                text = await hf_generate(prompt, temperature, max_tokens)
+                provider = "huggingface"; model = HF_MODEL
+            else:
+                raise e
+    # Else, try HF directly (if configured)
+    elif HF_API_TOKEN:
+        prompt = to_instruct_prompt(messages)
+        text = await hf_generate(prompt, temperature, max_tokens)
+        provider = "huggingface"; model = HF_MODEL
+    else:
+        raise HTTPException(status_code=500, detail="No provider configured. Set GROQ_API_KEY or HF_API_TOKEN.")
+
+    return JSONResponse({"reply": text or "", "usage": {}, "model": model, "provider": provider})
+
+# === Routes ===
+@app.post("/api/chat")
+async def chat(req: Request):
+    return await handle_chat(req)
+
+@app.post("/api/chat/")
+async def chat_slash(req: Request):
+    return await handle_chat(req)
 
 @app.get("/api/ping")
 def ping():
     return {"ok": True}
-
-@app.post("/api/echo")
-async def echo(req: Request):
-    body = await req.json()
-    return {"you_sent": body}
-
-# Add a debug route to see all available routes
-@app.get("/debug/routes")
-def list_routes():
-    routes = []
-    for route in app.routes:
-        if hasattr(route, 'methods') and hasattr(route, 'path'):
-            routes.append({
-                "path": route.path,
-                "methods": list(route.methods) if route.methods else []
-            })
-    return {"routes": routes}
-
-# Health check endpoint
-@app.get("/health")
-def health():
-    return {"status": "healthy", "model": HF_MODEL, "token_configured": bool(HF_API_TOKEN)}
